@@ -1,229 +1,368 @@
 <?php
-/**
- * Drop-in: Naturasoft CSV Product Import (compat)
- * Adds POST /wp-json/naturasoft/v1/products endpoint to import products from Naturasoft pipe-delimited CSV.
- * Compatibility: avoids arrow functions; has mbstring fallbacks.
- *
- * Usage in your main plugin file (ensure WooCommerce is loaded first):
- *
- *   add_action('plugins_loaded', function() {
- *       if ( class_exists('WooCommerce') ) {
- *           require_once plugin_dir_path(__FILE__) . 'includes/class-naturas-products-import.php';
- *           if ( class_exists('Naturasoft_Products_Import') ) {
- *               Naturasoft_Products_Import::init();
- *           }
- *       }
- *   }, 20);
- */
-if ( ! defined('ABSPATH') ) exit;
+if (!defined('ABSPATH')) exit;
 
-if ( ! class_exists('Naturasoft_Products_Import') ) {
+// SimpleXLSX – egyfájlos XLSX olvasó, Composer nélkül
+require_once __DIR__ . '/lib/SimpleXLSX.php';
+
+// Ha a library namespaced (Shuchkin\SimpleXLSX), aliasoljuk globális SimpleXLSX-re
+if (class_exists('\Shuchkin\SimpleXLSX') && !class_exists('\SimpleXLSX')) {
+    class_alias('\Shuchkin\SimpleXLSX', 'SimpleXLSX');
+}
+
+/**
+ * Naturasoft XLSX termékimport WooCommerce-be.
+ */
 class Naturasoft_Products_Import {
-    const OPTION_API_KEY = 'naturasoft_api_key'; // shared option
 
     public static function init() {
-        add_action('rest_api_init', array(__CLASS__, 'register_routes'));
+        add_action('admin_menu', [__CLASS__, 'add_menu']);
+        add_action('admin_init', [__CLASS__, 'handle_post']);
     }
 
-    public static function register_routes() {
-        register_rest_route('naturasoft/v1', '/products', array(
-            'methods'  => 'POST',
-            'callback' => array(__CLASS__, 'handle_import'),
-            'permission_callback' => array(__CLASS__, 'auth_check'),
-            'args' => array(
-                'csv' => array('type'=>'string','required'=>false),
-                'dry_run' => array('type'=>'boolean','required'=>false,'default'=>false),
-                'publish' => array('type'=>'boolean','required'=>false,'default'=>true),
-            ),
-        ));
+    public static function add_menu() {
+        add_submenu_page(
+            'woocommerce',
+            'Naturasoft Termékimport (XLSX)',
+            'Naturasoft Termékimport',
+            'manage_woocommerce',
+            'nsa-product-import-xlsx',
+            [__CLASS__, 'render_page']
+        );
     }
 
-    public static function auth_check( WP_REST_Request $request ) {
-        // 1️⃣ Token források: header / bearer / ?key=
-        $provided = $request->get_header('X-Naturasoft-Key');
-        if ( empty($provided) ) {
-            $auth = $request->get_header('Authorization');
-            if ( is_string($auth) && stripos($auth, 'Bearer ') === 0 ) {
-                $provided = trim(substr($auth, 7));
-            }
+    public static function render_page() {
+        if (!current_user_can('manage_woocommerce')) {
+            wp_die('Nincs jogosultság.');
         }
-        if ( empty($provided) ) {
-            $provided = $request->get_param('key');
-        }
+        ?>
+        <div class="wrap">
+            <h1>Naturasoft Termékimport (XLSX)</h1>
+            <form method="post" enctype="multipart/form-data">
+                <?php wp_nonce_field('nsa_import_xlsx', 'nsa_import_xlsx_nonce'); ?>
 
-        // 2️⃣ Megpróbáljuk a fő plugin opciójából (Naturasoft Sync A) is kiolvasni
-        $expected = get_option(self::OPTION_API_KEY, '');
-        if ( empty($expected) ) {
-            $sync_opts = get_option('naturasoft_sync_a_options', array());
-            if ( is_array($sync_opts) && ! empty($sync_opts['api_token']) ) {
-                $expected = $sync_opts['api_token'];
-            }
-        }
+                <p>
+                    <input type="file" name="nsa_file" accept=".xlsx,.xls" required>
+                </p>
 
-        // 3️⃣ Ha nincs kulcs beállítva, csak admin hívhatja
-        if ( empty($expected) ) {
-            return current_user_can('manage_options');
-        }
+                <p>
+                    <label>Hiányzó ár esetén:
+                        <select name="nsa_price_fallback">
+                            <option value="0">0 Ft</option>
+                            <option value="skip">Sor kihagyása</option>
+                        </select>
+                    </label>
+                </p>
 
-        // 4️⃣ Összehasonlítás (biztonságos)
-        return is_string($provided) && hash_equals((string)$expected, (string)$provided);
+                <p>
+                    <label>Kategória elválasztó:
+                        <input type="text" name="nsa_cat_sep" value=">" size="2">
+                    </label>
+
+                    <label style="margin-left:1em">Kép URL-ek elválasztó:
+                        <input type="text" name="nsa_img_sep" value=";" size="2">
+                    </label>
+                </p>
+
+                <p>
+                    <button class="button" name="nsa_action" value="preview">Előnézet</button>
+                    <button class="button button-primary" name="nsa_action" value="import">Importálás</button>
+                </p>
+            </form>
+        </div>
+        <?php
     }
 
+    public static function handle_post() {
+        if (!isset($_POST['nsa_action'])) return;
+        if (!current_user_can('manage_woocommerce')) return;
+        if (!wp_verify_nonce($_POST['nsa_import_xlsx_nonce'] ?? '', 'nsa_import_xlsx')) return;
+        if (empty($_FILES['nsa_file']['tmp_name'])) return;
 
-    public static function handle_import( WP_REST_Request $request ) {
-        $dry_run = (bool) $request->get_param('dry_run');
-        $publish = (bool) $request->get_param('publish');
-        $csv     = $request->get_param('csv');
+        $tmp = $_FILES['nsa_file']['tmp_name'];
+        $price_fallback = $_POST['nsa_price_fallback'] ?? '0';
+        $cat_sep = $_POST['nsa_cat_sep'] ?? '>';
+        $img_sep = $_POST['nsa_img_sep'] ?? ';';
 
-        if ( empty($csv) && ! empty($_FILES['file']['tmp_name']) && is_uploaded_file($_FILES['file']['tmp_name']) ) {
-            $csv = file_get_contents($_FILES['file']['tmp_name']);
-        }
-        if ( empty($csv) ) {
-            return new WP_REST_Response(array('ok'=>false,'error'=>'Hiányzik a CSV (csv param vagy file).'), 400);
-        }
-
-        $csv = self::to_utf8($csv);
-        $rows = self::parse_pipe_csv($csv);
-        if ( empty($rows) ) return new WP_REST_Response(array('ok'=>false,'error'=>'Üres vagy hibás CSV.'), 400);
-
-        $required_headers = array('NATURASOFTID','MEGNEVEZES','TERMEKKOD','CIKKSZAM','VTSZ','MEE','SZABADKESZLET');
-        $missing = array_diff($required_headers, array_keys($rows[0]));
-        if ( ! empty($missing) ) {
-            return new WP_REST_Response(array('ok'=>false,'error'=>'Hiányzó fejléc(ek): '.implode(', ',$missing)), 400);
+        try {
+            $rows = nsa_xlsx_parse($tmp);
+        } catch (\Throwable $e) {
+            add_action('admin_notices', function() use ($e) {
+                echo '<div class="notice notice-error"><p>Hiba az XLSX olvasásakor: ' .
+                    esc_html($e->getMessage()) . '</p></div>';
+            });
+            return;
         }
 
-        $result = array('ok'=>true,'dry_run'=>$dry_run,'created'=>0,'updated'=>0,'skipped'=>0,'items'=>array());
-
-        foreach ($rows as $i=>$row) {
-            $line = $i+2;
-            $naturas_id = trim((string)(isset($row['NATURASOFTID']) ? $row['NATURASOFTID'] : ''));
-            $name       = trim((string)(isset($row['MEGNEVEZES']) ? $row['MEGNEVEZES'] : ''));
-            $termekkod  = trim((string)(isset($row['TERMEKKOD']) ? $row['TERMEKKOD'] : ''));
-            $cikkszam   = trim((string)(isset($row['CIKKSZAM']) ? $row['CIKKSZAM'] : ''));
-            $vtsz       = trim((string)(isset($row['VTSZ']) ? $row['VTSZ'] : ''));
-            $mee        = trim((string)(isset($row['MEE']) ? $row['MEE'] : ''));
-            $kstr       = trim((string)(isset($row['SZABADKESZLET']) ? $row['SZABADKESZLET'] : '0'));
-
-            if ($naturas_id === '' || $name === '') {
-                $result['skipped']++;
-                $result['items'][] = array('line'=>$line,'status'=>'skipped','reason'=>'NATURASOFTID és MEGNEVEZES kötelező.');
-                continue;
-            }
-
-            $norm = str_replace(array(','), array('.'), $kstr);
-            $stock_qty = is_numeric($norm) ? (float)$norm : 0.0;
-            $sku = $termekkod !== '' ? $termekkod : $cikkszam;
-
-            $existing_id = self::find_product_by_naturas_id($naturas_id);
-            if (!$existing_id && $sku!=='') {
-                $maybe = function_exists('wc_get_product_id_by_sku') ? wc_get_product_id_by_sku($sku) : 0;
-                if ($maybe) {
-                    $existing_id = (int)$maybe;
-                    if (!$dry_run) update_post_meta($existing_id,'_naturas_id',$naturas_id);
+        if ($_POST['nsa_action'] === 'preview') {
+            add_action('admin_notices', function() use ($rows) {
+                if (!$rows) {
+                    echo '<div class="notice notice-warning"><p>Nincs adat az XLSX-ben.</p></div>';
+                    return;
                 }
-            }
+                echo '<div class="notice notice-info"><p><strong>Előnézet (első 10 sor):</strong></p>';
+                echo '<table class="widefat"><thead><tr>';
+                foreach (array_keys($rows[0]) as $h) {
+                    echo '<th>' . esc_html($h) . '</th>';
+                }
+                echo '</tr></thead><tbody>';
+                foreach (array_slice($rows, 0, 10) as $r) {
+                    echo '<tr>';
+                    foreach ($r as $v) {
+                        echo '<td>' . esc_html((string)$v) . '</td>';
+                    }
+                    echo '</tr>';
+                }
+                echo '</tbody></table></div>';
+            });
+            return;
+        }
 
-            $summary = array('line'=>$line,'naturas_id'=>$naturas_id,'name'=>$name,'sku'=>$sku,'stock_quantity'=>$stock_qty,'mee'=>$mee,'vtsz'=>$vtsz);
-            if ($dry_run) {
-                $summary['status'] = $existing_id ? 'would_update' : 'would_create';
-                $result['items'][] = $summary;
+        $report = nsa_xlsx_import_products($rows, [
+            'price_fallback' => $price_fallback,
+            'cat_sep'        => $cat_sep,
+            'img_sep'        => $img_sep,
+        ]);
+
+        add_action('admin_notices', function() use ($report) {
+            echo '<div class="notice notice-success"><p><strong>Import kész.</strong> ' .
+                sprintf(
+                    'Létrejött: %d, frissült: %d, kihagyva: %d',
+                    $report['created'],
+                    $report['updated'],
+                    $report['skipped']
+                ) . '</p></div>';
+        });
+    }
+}
+
+/**
+ * XLSX beolvasása SimpleXLSX-szel
+ */
+function nsa_xlsx_parse($path) {
+    if (!class_exists('SimpleXLSX') && !class_exists('\Shuchkin\SimpleXLSX')) {
+        throw new \RuntimeException('SimpleXLSX osztály nem elérhető.');
+    }
+
+    // Itt már az alias miatt elég a globális SimpleXLSX
+    $xlsx = \SimpleXLSX::parse($path);
+    if (!$xlsx) {
+        $err = method_exists('\SimpleXLSX', 'parseError')
+            ? \SimpleXLSX::parseError()
+            : 'ismeretlen hiba';
+        throw new \RuntimeException('Nem sikerült beolvasni az XLSX fájlt: ' . $err);
+    }
+
+    $rows = $xlsx->rows(); // [ [cell1, cell2,...], [ ... ], ... ]
+
+    if (empty($rows) || empty($rows[0])) {
+        throw new \RuntimeException('Üres XLSX fájl vagy hiányzó fejléc.');
+    }
+
+    // 1. sor: fejlécek
+    $headersRow = $rows[0];
+    $headers = [];
+    foreach ($headersRow as $idx => $header) {
+        $header = trim((string)$header);
+        if ($header !== '') {
+            $headers[$idx] = $header;
+        }
+    }
+
+    if (!$headers) {
+        throw new \RuntimeException('Hiányoznak a fejléc mezők az első sorban.');
+    }
+
+    $out = [];
+    for ($i = 1; $i < count($rows); $i++) {
+        $row = $rows[$i];
+        $assoc = [];
+        foreach ($headers as $colIndex => $header) {
+            $assoc[$header] = isset($row[$colIndex]) ? trim((string)$row[$colIndex]) : '';
+        }
+        $out[] = nsa_normalize_row($assoc);
+    }
+
+    // üres sorok kiszűrése
+    return array_values(array_filter($out, function($r) {
+        return !empty($r['name']) || !empty($r['sku']);
+    }));
+}
+
+/**
+ * Fejlécek normalizálása: Naturasoft / magyar oszlopnevekből belső kulcsok.
+ */
+function nsa_normalize_row(array $r) {
+    $map = [
+        'sku'               => ['Cikkszám','SKU'],
+        'name'              => ['Megnevezés','Név','Termék megnevezés'],
+        'net_price'         => ['Nettó ár'],
+        'gross_price'       => ['Bruttó ár'],
+        'vat'               => ['ÁFA','ÁFA%'],
+        'stock'             => ['Készlet','Mennyiség'],
+        'unit'              => ['Mértékegység','Egység'],
+        'short_description' => ['Rövid leírás'],
+        'description'       => ['Leírás'],
+        'category'          => ['Kategória','Kategóriák'],
+        'images'            => ['Kép URL','Kép URL-ek'],
+    ];
+
+    $norm = [
+        'sku'               => '',
+        'name'              => '',
+        'net_price'         => '',
+        'gross_price'       => '',
+        'vat'               => '',
+        'stock'             => '',
+        'unit'              => '',
+        'short_description' => '',
+        'description'       => '',
+        'category'          => '',
+        'images'            => '',
+    ];
+
+    foreach ($map as $k => $aliases) {
+        foreach ($aliases as $a) {
+            if (array_key_exists($a, $r) && $r[$a] !== '') {
+                $norm[$k] = $r[$a];
+                break;
+            }
+        }
+    }
+
+    return $norm;
+}
+
+/**
+ * Termékek importálása / frissítése
+ */
+function nsa_xlsx_import_products(array $rows, array $opts = []) {
+    $created = $updated = $skipped = 0;
+    $cat_sep = $opts['cat_sep'] ?? '>';
+    $img_sep = $opts['img_sep'] ?? ';';
+    $price_fallback = $opts['price_fallback'] ?? '0';
+
+    foreach ($rows as $r) {
+        $name = trim((string)$r['name']);
+        $sku  = trim((string)$r['sku']);
+        if (!$name || !$sku) { $skipped++; continue; }
+
+        // Ár számítás
+        $gross = null;
+        if ($r['gross_price'] !== '' && is_numeric($r['gross_price'])) {
+            $gross = (float)$r['gross_price'];
+        } elseif ($r['net_price'] !== '' && is_numeric($r['net_price']) && is_numeric($r['vat'] ?? null)) {
+            $gross = (float)$r['net_price'] * (1 + ((float)$r['vat']) / 100.0);
+        } else {
+            if ($price_fallback === 'skip') {
+                $skipped++;
                 continue;
             }
+            $gross = 0.0;
+        }
 
-            if ($existing_id) {
-                $pid = $existing_id;
-                wp_update_post(array('ID'=>$pid,'post_title'=>$name));
-                if ($sku!=='') update_post_meta($pid,'_sku', function_exists('wc_clean')? wc_clean($sku): $sku);
-                update_post_meta($pid,'_manage_stock','yes');
-                update_post_meta($pid,'_stock', function_exists('wc_stock_amount')? wc_stock_amount($stock_qty): $stock_qty);
-                update_post_meta($pid,'_stock_status',$stock_qty>0?'instock':'outofstock');
-                update_post_meta($pid,'_naturas_id',$naturas_id);
-                if ($vtsz!=='') update_post_meta($pid,'_vtsz',$vtsz);
-                if ($mee!=='')  update_post_meta($pid,'_mee',$mee);
-                self::upsert_custom_attributes($pid,array('MEE'=>$mee,'VTSZ'=>$vtsz));
-                $result['updated']++; $summary['status']='updated'; $summary['product_id']=$pid; $result['items'][]=$summary;
-            } else {
-                $pid = wp_insert_post(array('post_type'=>'product','post_title'=>$name,'post_status'=>$publish?'publish':'draft'));
-                if (is_wp_error($pid)) { $result['skipped']++; $summary['status']='error'; $summary['error']=$pid->get_error_message(); $result['items'][]=$summary; continue; }
-                update_post_meta($pid,'_visibility','visible');
-                update_post_meta($pid,'_naturas_id',$naturas_id);
-                if ($sku!=='') update_post_meta($pid,'_sku', function_exists('wc_clean')? wc_clean($sku): $sku);
-                if (function_exists('wp_set_object_terms')) wp_set_object_terms($pid,'simple','product_type');
-                update_post_meta($pid,'_manage_stock','yes');
-                update_post_meta($pid,'_stock', function_exists('wc_stock_amount')? wc_stock_amount($stock_qty): $stock_qty);
-                update_post_meta($pid,'_stock_status',$stock_qty>0?'instock':'outofstock');
-                if ($vtsz!=='') update_post_meta($pid,'_vtsz',$vtsz);
-                if ($mee!=='')  update_post_meta($pid,'_mee',$mee);
-                self::upsert_custom_attributes($pid,array('MEE'=>$mee,'VTSZ'=>$vtsz));
-                $result['created']++; $summary['status']='created'; $summary['product_id']=$pid; $result['items'][]=$summary;
+        $stock = ($r['stock'] !== '' && is_numeric($r['stock'])) ? (int)$r['stock'] : null;
+
+        // SKU alapú CRUD
+        $product_id = wc_get_product_id_by_sku($sku);
+        if ($product_id) {
+            $product = wc_get_product($product_id);
+        } else {
+            $product = new WC_Product_Simple();
+            $product->set_sku($sku);
+        }
+
+        $product->set_name($name);
+        $product->set_regular_price(wc_format_decimal($gross));
+        $product->set_manage_stock(true);
+        if ($stock !== null) {
+            $product->set_stock_quantity($stock);
+            $product->set_stock_status($stock > 0 ? 'instock' : 'outofstock');
+        }
+
+        if (!empty($r['short_description'])) {
+            $product->set_short_description(wp_kses_post($r['short_description']));
+        }
+        if (!empty($r['description'])) {
+            $product->set_description(wp_kses_post($r['description']));
+        }
+
+        // Kategória
+        if (!empty($r['category'])) {
+            $cat_ids = nsa_ensure_categories($r['category'], $cat_sep);
+            if ($cat_ids) {
+                $product->set_category_ids($cat_ids);
             }
         }
 
-        return new WP_REST_Response($result,200);
+        $is_new = !$product_id;
+        $product_id = $product->save();
+
+        // Képek (első: kiemelt, többi: galéria)
+        if (!empty($r['images'])) {
+            $urls = array_filter(array_map('trim', explode($img_sep, $r['images'])));
+            nsa_attach_images($product_id, $urls);
+        }
+
+        update_post_meta($product_id, '_nsa_source', 'xlsx');
+        $row_hash = md5(json_encode([$name, $sku, $gross, $stock, $r['category'] ?? '', $r['images'] ?? '']));
+        update_post_meta($product_id, '_nsa_row_hash', $row_hash);
+
+        if ($is_new) $created++; else $updated++;
     }
 
-    private static function to_utf8( $s ) {
-        // Strip UTF-8 BOM
-        $s = preg_replace('/^\xEF\xBB\xBF/', '', $s);
-        // mbstring fallback
-        if (function_exists('mb_check_encoding') && ! mb_check_encoding($s, 'UTF-8')) {
-            if (function_exists('mb_convert_encoding')) {
-                $s = mb_convert_encoding($s, 'UTF-8', 'Windows-1250, ISO-8859-2, ISO-8859-1, UTF-8');
-            } elseif (function_exists('iconv')) {
-                $converted = @iconv('Windows-1250', 'UTF-8//IGNORE', $s);
-                if ($converted !== false) $s = $converted;
+    return [
+        'created' => $created,
+        'updated' => $updated,
+        'skipped' => $skipped,
+    ];
+}
+
+/**
+ * Kategória-hierarchia biztosítása (pl. "Fő>Al")
+ */
+function nsa_ensure_categories($path, $sep = '>') {
+    $parts = array_map('trim', explode($sep, $path));
+    $parent = 0;
+    $ids = [];
+
+    foreach ($parts as $name) {
+        if ($name === '') continue;
+        $term = term_exists($name, 'product_cat', $parent);
+        if (!$term) {
+            $term = wp_insert_term($name, 'product_cat', ['parent' => $parent]);
+        }
+        if (!is_wp_error($term)) {
+            $term_id = is_array($term) ? (int)$term['term_id'] : (int)$term;
+            $ids[] = $term_id;
+            $parent = $term_id;
+        }
+    }
+
+    return $ids;
+}
+
+/**
+ * Képek letöltése és hozzárendelése termékhez
+ */
+function nsa_attach_images($product_id, array $urls) {
+    if (empty($urls)) return;
+    $media_ids = [];
+
+    foreach ($urls as $i => $url) {
+        $attachment_id = media_sideload_image($url, $product_id, null, 'id');
+        if (!is_wp_error($attachment_id)) {
+            $media_ids[] = (int)$attachment_id;
+            if ($i === 0) {
+                set_post_thumbnail($product_id, (int)$attachment_id);
             }
         }
-        return $s;
     }
 
-    private static function parse_pipe_csv( $csv ) {
-        $lines = preg_split("/\r\n|\n|\r/", $csv);
-        // remove empty/whitespace-only lines
-        $tmp = array();
-        foreach ($lines as $l) { if (trim($l) !== '') $tmp[] = $l; }
-        $lines = array_values($tmp);
-        if (count($lines) < 2) return array();
-
-        $header = array_map('trim', explode('|', $lines[0]));
-        $rows = array();
-        for ($i=1; $i<count($lines); $i++) {
-            $cols = explode('|', $lines[$i]);
-            if (count($cols) < count($header)) {
-                $cols = array_pad($cols, count($header), '');
-            }
-            $assoc = array();
-            foreach ($header as $idx => $key) {
-                $assoc[$key] = isset($cols[$idx]) ? trim($cols[$idx]) : '';
-            }
-            $rows[] = $assoc;
-        }
-        return $rows;
+    if (count($media_ids) > 1) {
+        update_post_meta(
+            $product_id,
+            '_product_image_gallery',
+            implode(',', array_slice($media_ids, 1))
+        );
     }
-
-    private static function find_product_by_naturas_id( $naturas_id ) {
-        global $wpdb;
-        $pid = $wpdb->get_var( $wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key=%s AND meta_value=%s LIMIT 1",
-            '_naturas_id', $naturas_id
-        ));
-        return $pid ? (int)$pid : null;
-    }
-
-    private static function upsert_custom_attributes( $product_id, $attrs ) {
-        $existing = get_post_meta($product_id, '_product_attributes', true);
-        if (!is_array($existing)) $existing = array();
-        foreach ($attrs as $name => $value){
-            if ($value===null || $value==='') continue;
-            $key = sanitize_title($name);
-            $existing[$key] = array(
-                'name'=> function_exists('wc_clean')? wc_clean($name): $name,
-                'value'=> function_exists('wc_clean')? wc_clean($value): $value,
-                'is_visible'=>1,
-                'is_variation'=>0,
-                'is_taxonomy'=>0,
-            );
-        }
-        update_post_meta($product_id, '_product_attributes', $existing);
-    }
-}}
+}
