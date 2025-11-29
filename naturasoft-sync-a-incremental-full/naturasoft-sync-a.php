@@ -454,8 +454,3 @@ final class Naturasoft_Sync_A {
 }
 
 add_action('plugins_loaded', function(){ new Naturasoft_Sync_A(); });
-
-// === Naturasoft XLSX Product Import ===
-if (file_exists(__DIR__ . '/includes/class-nsa-xlsx-import.php')) {
-    require_once __DIR__ . '/includes/class-nsa-xlsx-import.php';
-}
