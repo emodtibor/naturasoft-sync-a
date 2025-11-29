@@ -1,0 +1,12 @@
+{
+  "name": "emodtibor/naturasoft-sync-a",
+  "description": "WooCommerce Naturasoft sync with XLSX import",
+  "require": {
+    "phpoffice/phpspreadsheet": "1.29.0"
+  },
+  "config": {
+    "audit": {
+      "block-insecure": false
+    }
+  }
+}

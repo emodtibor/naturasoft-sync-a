@@ -4,7 +4,7 @@ Tags: woocommerce, naturasoft, xml, export, token, batch, hpos
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.7.4
+Stable tag: 0.8.0
 License: GPLv2 or later
 
 Incrementális végpontok (HPOS-kompatibilis):
@@ -19,3 +19,11 @@ Végpontok:
 
 Beállítások:
 - Rolling státusz-szűrő, Batch limit, Exportált jelzők törlése gomb.
+
+== Újdonságok ==
+= 0.8.0 =
+- Új: Naturasoft Termékimport (XLSX) admin oldal
+- XLSX / XLS import PhpSpreadsheet-tel
+- SKU alapján frissít, új terméket létrehoz
+- Árak, készlet, kategória, képek, leírás támogatott
+- Képek automatikus letöltése URL-ből
