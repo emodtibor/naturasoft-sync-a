@@ -3,10 +3,16 @@ if (!defined('ABSPATH')) exit;
 
 // SimpleXLSX – egyfájlos XLSX olvasó, Composer nélkül
 require_once __DIR__ . '/lib/SimpleXLSX.php';
+require_once __DIR__ . '/lib/SimpleXLS.php';
 
 // Ha a library namespaced (Shuchkin\SimpleXLSX), aliasoljuk globális SimpleXLSX-re
 if (class_exists('\Shuchkin\SimpleXLSX') && !class_exists('\SimpleXLSX')) {
     class_alias('\Shuchkin\SimpleXLSX', 'SimpleXLSX');
+}
+
+// Ha namespaced (Shuchkin\SimpleXLS), aliasoljuk globális SimpleXLS-re
+if (class_exists('\Shuchkin\SimpleXLS') && !class_exists('\SimpleXLS')) {
+    class_alias('\Shuchkin\SimpleXLS', 'SimpleXLS');
 }
 
 /**
@@ -139,23 +145,46 @@ class Naturasoft_Products_Import {
  * XLSX beolvasása SimpleXLSX-szel
  */
 function nsa_xlsx_parse($path) {
-    if (!class_exists('SimpleXLSX') && !class_exists('\Shuchkin\SimpleXLSX')) {
-        throw new \RuntimeException('SimpleXLSX osztály nem elérhető.');
-    }
+    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
 
-    // Itt már az alias miatt elég a globális SimpleXLSX
-    $xlsx = \SimpleXLSX::parse($path);
-    if (!$xlsx) {
-        $err = method_exists('\SimpleXLSX', 'parseError')
-            ? \SimpleXLSX::parseError()
-            : 'ismeretlen hiba';
-        throw new \RuntimeException('Nem sikerült beolvasni az XLSX fájlt: ' . $err);
-    }
+    // XLSX – SimpleXLSX
+    if ($ext === 'xlsx') {
+        if (!class_exists('SimpleXLSX') && !class_exists('\Shuchkin\SimpleXLSX')) {
+            throw new \RuntimeException('SimpleXLSX osztály nem elérhető XLSX fájlhoz.');
+        }
 
-    $rows = $xlsx->rows(); // [ [cell1, cell2,...], [ ... ], ... ]
+        $xlsx = \SimpleXLSX::parse($path);
+        if (!$xlsx) {
+            $err = method_exists('\SimpleXLSX', 'parseError')
+                ? \SimpleXLSX::parseError()
+                : 'ismeretlen hiba';
+            throw new \RuntimeException('Nem sikerült beolvasni az XLSX fájlt: ' . $err);
+        }
+
+        $rows = $xlsx->rows(); // [ [cell1, cell2,...], ... ]
+    }
+    // XLS – SimpleXLS
+    elseif ($ext === 'xls') {
+        if (!class_exists('SimpleXLS') && !class_exists('\Shuchkin\SimpleXLS')) {
+            throw new \RuntimeException('SimpleXLS osztály nem elérhető XLS fájlhoz.');
+        }
+
+        $xls = \SimpleXLS::parseFile($path);
+        if (!$xls) {
+            $err = method_exists('\SimpleXLS', 'parseError')
+                ? \SimpleXLS::parseError()
+                : 'ismeretlen hiba';
+            throw new \RuntimeException('Nem sikerült beolvasni az XLS fájlt: ' . $err);
+        }
+
+        $rows = $xls->rows();
+    }
+    else {
+        throw new \RuntimeException('Ismeretlen kiterjesztés: ' . $ext . ' (csak .xls vagy .xlsx támogatott).');
+    }
 
     if (empty($rows) || empty($rows[0])) {
-        throw new \RuntimeException('Üres XLSX fájl vagy hiányzó fejléc.');
+        throw new \RuntimeException('Üres Excel fájl vagy hiányzó fejléc.');
     }
 
     // 1. sor: fejlécek
@@ -187,6 +216,7 @@ function nsa_xlsx_parse($path) {
         return !empty($r['name']) || !empty($r['sku']);
     }));
 }
+
 
 /**
  * Fejlécek normalizálása: Naturasoft / magyar oszlopnevekből belső kulcsok.
