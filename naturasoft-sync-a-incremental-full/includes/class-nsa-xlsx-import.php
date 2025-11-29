@@ -2,8 +2,10 @@
 /**
  * Naturasoft XLSX Product Import
  * HPOS-kompatibilis, WooCommerce CRUD API-val
- * Requires: phpoffice/phpspreadsheet
  */
+
+// SimpleXLSX loader – kis egyfájlos XLSX olvasó, Composer nélkül
+require_once __DIR__ . '/lib/simplexlsx.php';
 
 if (!defined('ABSPATH')) exit;
 
@@ -104,30 +106,49 @@ add_action('admin_init', function(){
 
 // === XLSX Parser ===
 function nsa_xlsx_parse($path){
-    if (!class_exists(\PhpOffice\PhpSpreadsheet\IOFactory::class)) {
-        throw new \RuntimeException('Hiányzik a PhpSpreadsheet. Telepítsd: composer require phpoffice/phpspreadsheet');
+    // SimpleXLSX használata
+    $xlsx = \SimpleXLSX::parse($path);
+    if (!$xlsx) {
+        throw new \RuntimeException('Nem sikerült beolvasni az XLSX fájlt: ' . \SimpleXLSX::parseError());
     }
-    $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($path);
-    $sheet = $spreadsheet->getActiveSheet();
-    $rows = $sheet->toArray(null, true, true, true);
 
-    $headers = array_map('trim', $rows[1] ?? []);
-    $headers = array_filter($headers, fn($h)=>$h!==null && $h!=='');
-    if (!$headers) throw new \RuntimeException('Hiányoznak a fejléc mezők az első sorban.');
+    $rows = $xlsx->rows(); // sima mátrix: [ [cell1, cell2, ...], [ ... ], ... ]
 
+    if (empty($rows) || empty($rows[0])) {
+        throw new \RuntimeException('Üres XLSX fájl vagy hiányzó fejléc.');
+    }
+
+    // 1. sor: fejlécek
+    $headersRow = $rows[0];
+    $headers = [];
+    foreach ($headersRow as $idx => $header) {
+        $header = trim((string)$header);
+        if ($header !== '') {
+            $headers[$idx] = $header;
+        }
+    }
+
+    if (!$headers) {
+        throw new \RuntimeException('Hiányoznak a fejléc mezők az első sorban.');
+    }
+
+    // További sorok: adatok
     $out = [];
-    for ($i=2; $i<=count($rows); $i++){
-        $row = $rows[$i] ?? [];
+    for ($i = 1; $i < count($rows); $i++) {
+        $row = $rows[$i];
         $assoc = [];
-        foreach ($headers as $colLetter => $header) {
-            $assoc[$header] = isset($row[$colLetter]) ? trim((string)$row[$colLetter]) : '';
+        foreach ($headers as $colIndex => $header) {
+            $assoc[$header] = isset($row[$colIndex]) ? trim((string)$row[$colIndex]) : '';
         }
         $out[] = nsa_normalize_row($assoc);
     }
+
+    // üres sorok eldobása
     return array_values(array_filter($out, function($r){
         return !empty($r['name']) || !empty($r['sku']);
     }));
 }
+
 
 function nsa_normalize_row(array $r){
     $map = [
