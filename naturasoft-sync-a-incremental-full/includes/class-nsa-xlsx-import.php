@@ -4,11 +4,16 @@
  * HPOS-kompatibilis, WooCommerce CRUD API-val
  */
 
-// SimpleXLSX loader – kis egyfájlos XLSX olvasó, Composer nélkül
-require_once __DIR__ . '/lib/simplexlsx.php';
 
 if (!defined('ABSPATH')) exit;
 
+// SimpleXLSX loader – kis egyfájlos XLSX olvasó, Composer nélkül
+require_once __DIR__ . '/lib/SimpleXLSX.php';
+
+// Ha namespaced (Shuchkin\SimpleXLSX), aliasoljuk globális SimpleXLSX-re
+if (class_exists('\Shuchkin\SimpleXLSX') && !class_exists('\SimpleXLSX')) {
+    class_alias('\Shuchkin\SimpleXLSX', 'SimpleXLSX');
+    
 // Admin menü
 add_action('admin_menu', function() {
     add_submenu_page(
