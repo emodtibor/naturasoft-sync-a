@@ -253,11 +253,11 @@ function nsa_normalize_row(array $r) {
     $map = [
         'sku'               => ['Cikkszám','SKU'],
         'name'              => ['Megnevezés','Név','Termék megnevezés'],
-        'net_price'         => ['Nettó ár'],
-        'gross_price'       => ['Bruttó ár'],
+        'net_price'         => ['Nettó ár','1. egységár nettó'],
+        'gross_price'       => ['Bruttó ár','1. egységár bruttó'],
         'vat'               => ['ÁFA','ÁFA%'],
         'stock'             => ['Készlet','Mennyiség'],
-        'unit'              => ['Mértékegység','Egység'],
+        'unit'              => ['Mértékegység','Egység','Mee'],
         'short_description' => ['Rövid leírás'],
         'description'       => ['Leírás'],
         'category'          => ['Kategória','Kategóriák'],
@@ -298,6 +298,15 @@ function nsa_xlsx_import_products(array $rows, array $opts = []) {
     $cat_sep = $opts['cat_sep'] ?? '>';
     $img_sep = $opts['img_sep'] ?? ';';
     $price_fallback = $opts['price_fallback'] ?? '0';
+    $vatRaw = $r['vat'] ?? '';
+    $vatNum = null;
+    if ($vatRaw !== '') {
+        // "27%" → "27", "5,5%" → "5.5"
+        $vatClean = str_replace(['%', ','], ['', '.'], $vatRaw);
+        if (is_numeric($vatClean)) {
+            $vatNum = (float)$vatClean;
+        }
+    }
 
     foreach ($rows as $r) {
         $name = trim((string)$r['name']);
@@ -308,8 +317,8 @@ function nsa_xlsx_import_products(array $rows, array $opts = []) {
         $gross = null;
         if ($r['gross_price'] !== '' && is_numeric($r['gross_price'])) {
             $gross = (float)$r['gross_price'];
-        } elseif ($r['net_price'] !== '' && is_numeric($r['net_price']) && is_numeric($r['vat'] ?? null)) {
-            $gross = (float)$r['net_price'] * (1 + ((float)$r['vat']) / 100.0);
+        } elseif ($r['net_price'] !== '' && is_numeric($r['net_price']) && $vatNum !== null) {
+            $gross = (float)$r['net_price'] * (1 + $vatNum / 100.0);
         } else {
             if ($price_fallback === 'skip') {
                 $skipped++;
