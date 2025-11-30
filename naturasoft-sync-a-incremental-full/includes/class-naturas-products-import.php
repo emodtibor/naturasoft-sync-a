@@ -257,7 +257,7 @@ function nsa_normalize_row(array $r) {
         'gross_price'       => ['Bruttó ár','1. egységár bruttó'],
         'vat'               => ['ÁFA','ÁFA%'],
         'stock'             => ['Készlet','Mennyiség'],
-        'unit'              => ['Mértékegység','Egység','Mee'],
+        'unit'              => ['Mértékegység','Egység','Mee','Mee.'],
         'short_description' => ['Rövid leírás'],
         'description'       => ['Leírás'],
         'category'          => ['Kategória','Kategóriák'],
