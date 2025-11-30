@@ -90,7 +90,8 @@ class Naturasoft_Products_Import {
         $img_sep = $_POST['nsa_img_sep'] ?? ';';
 
         try {
-            $rows = nsa_xlsx_parse($tmp);
+            $original_name = $_FILES['nsa_file']['name'] ?? '';
+            $rows = nsa_xlsx_parse($tmp, $original_name);
         } catch (\Throwable $e) {
             add_action('admin_notices', function() use ($e) {
                 echo '<div class="notice notice-error"><p>Hiba az XLSX olvasásakor: ' .
@@ -144,78 +145,105 @@ class Naturasoft_Products_Import {
 /**
  * XLSX beolvasása SimpleXLSX-szel
  */
-function nsa_xlsx_parse($path) {
-    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+if (!function_exists('nsa_xlsx_parse')) {
+    function nsa_xlsx_parse($path, $originalName = '') {
+        // kiterjesztés az eredeti fájlnévből, ha van
+        $ext = strtolower(pathinfo($originalName ?: $path, PATHINFO_EXTENSION));
 
-    // XLSX – SimpleXLSX
-    if ($ext === 'xlsx') {
-        if (!class_exists('SimpleXLSX') && !class_exists('\Shuchkin\SimpleXLSX')) {
-            throw new \RuntimeException('SimpleXLSX osztály nem elérhető XLSX fájlhoz.');
+        // 1) Ha egyértelműen XLSX
+        if ($ext === 'xlsx') {
+            if (!class_exists('SimpleXLSX') && !class_exists('\Shuchkin\SimpleXLSX')) {
+                throw new \RuntimeException('SimpleXLSX osztály nem elérhető XLSX fájlhoz.');
+            }
+
+            $xlsx = \SimpleXLSX::parse($path);
+            if (!$xlsx) {
+                $err = method_exists('\SimpleXLSX', 'parseError')
+                    ? \SimpleXLSX::parseError()
+                    : 'ismeretlen hiba';
+                throw new \RuntimeException('Nem sikerült beolvasni az XLSX fájlt: ' . $err);
+            }
+
+            $rows = $xlsx->rows();
+        }
+        // 2) Ha egyértelműen XLS
+        elseif ($ext === 'xls') {
+            if (!class_exists('SimpleXLS') && !class_exists('\Shuchkin\SimpleXLS')) {
+                throw new \RuntimeException('SimpleXLS osztály nem elérhető XLS fájlhoz.');
+            }
+
+            $xls = \SimpleXLS::parseFile($path);
+            if (!$xls) {
+                $err = method_exists('\SimpleXLS', 'parseError')
+                    ? \SimpleXLS::parseError()
+                    : 'ismeretlen hiba';
+                throw new \RuntimeException('Nem sikerült beolvasni az XLS fájlt: ' . $err);
+            }
+
+            $rows = $xls->rows();
+        }
+        // 3) Ha a kiterjesztés nem látszik (pl. /tmp/php1234), próbáljuk sorban
+        else {
+            // próbáljuk először XLSX-ként
+            if (class_exists('SimpleXLSX') || class_exists('\Shuchkin\SimpleXLSX')) {
+                $xlsx = @\SimpleXLSX::parse($path);
+                if ($xlsx && ($tmpRows = $xlsx->rows()) && !empty($tmpRows)) {
+                    $rows = $tmpRows;
+                } else {
+                    $rows = null;
+                }
+            } else {
+                $rows = null;
+            }
+
+            // ha nem sikerült, próbáljuk XLS-ként
+            if (!$rows) {
+                if (!class_exists('SimpleXLS') && !class_exists('\Shuchkin\SimpleXLS')) {
+                    throw new \RuntimeException('Ismeretlen kiterjesztés és SimpleXLS / SimpleXLSX sem elérhető.');
+                }
+
+                $xls = @\SimpleXLS::parseFile($path);
+                if (!$xls) {
+                    throw new \RuntimeException('Ismeretlen kiterjesztés: ' . $ext . ' (csak .xls vagy .xlsx támogatott).');
+                }
+                $rows = $xls->rows();
+            }
         }
 
-        $xlsx = \SimpleXLSX::parse($path);
-        if (!$xlsx) {
-            $err = method_exists('\SimpleXLSX', 'parseError')
-                ? \SimpleXLSX::parseError()
-                : 'ismeretlen hiba';
-            throw new \RuntimeException('Nem sikerült beolvasni az XLSX fájlt: ' . $err);
+        if (empty($rows) || empty($rows[0])) {
+            throw new \RuntimeException('Üres Excel fájl vagy hiányzó fejléc.');
         }
 
-        $rows = $xlsx->rows(); // [ [cell1, cell2,...], ... ]
-    }
-    // XLS – SimpleXLS
-    elseif ($ext === 'xls') {
-        if (!class_exists('SimpleXLS') && !class_exists('\Shuchkin\SimpleXLS')) {
-            throw new \RuntimeException('SimpleXLS osztály nem elérhető XLS fájlhoz.');
+        // 1. sor: fejlécek
+        $headersRow = $rows[0];
+        $headers = [];
+        foreach ($headersRow as $idx => $header) {
+            $header = trim((string)$header);
+            if ($header !== '') {
+                $headers[$idx] = $header;
+            }
         }
 
-        $xls = \SimpleXLS::parseFile($path);
-        if (!$xls) {
-            $err = method_exists('\SimpleXLS', 'parseError')
-                ? \SimpleXLS::parseError()
-                : 'ismeretlen hiba';
-            throw new \RuntimeException('Nem sikerült beolvasni az XLS fájlt: ' . $err);
+        if (!$headers) {
+            throw new \RuntimeException('Hiányoznak a fejléc mezők az első sorban.');
         }
 
-        $rows = $xls->rows();
-    }
-    else {
-        throw new \RuntimeException('Ismeretlen kiterjesztés: ' . $ext . ' (csak .xls vagy .xlsx támogatott).');
-    }
-
-    if (empty($rows) || empty($rows[0])) {
-        throw new \RuntimeException('Üres Excel fájl vagy hiányzó fejléc.');
-    }
-
-    // 1. sor: fejlécek
-    $headersRow = $rows[0];
-    $headers = [];
-    foreach ($headersRow as $idx => $header) {
-        $header = trim((string)$header);
-        if ($header !== '') {
-            $headers[$idx] = $header;
+        $out = [];
+        for ($i = 1; $i < count($rows); $i++) {
+            $row = $rows[$i];
+            $assoc = [];
+            foreach ($headers as $colIndex => $header) {
+                $assoc[$header] = isset($row[$colIndex]) ? trim((string)$row[$colIndex]) : '';
+            }
+            $out[] = nsa_normalize_row($assoc);
         }
-    }
 
-    if (!$headers) {
-        throw new \RuntimeException('Hiányoznak a fejléc mezők az első sorban.');
+        return array_values(array_filter($out, function($r) {
+            return !empty($r['name']) || !empty($r['sku']);
+        }));
     }
-
-    $out = [];
-    for ($i = 1; $i < count($rows); $i++) {
-        $row = $rows[$i];
-        $assoc = [];
-        foreach ($headers as $colIndex => $header) {
-            $assoc[$header] = isset($row[$colIndex]) ? trim((string)$row[$colIndex]) : '';
-        }
-        $out[] = nsa_normalize_row($assoc);
-    }
-
-    // üres sorok kiszűrése
-    return array_values(array_filter($out, function($r) {
-        return !empty($r['name']) || !empty($r['sku']);
-    }));
 }
+
 
 
 /**
