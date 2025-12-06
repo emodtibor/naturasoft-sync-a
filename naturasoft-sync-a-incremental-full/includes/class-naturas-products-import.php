@@ -260,7 +260,7 @@ function nsa_normalize_row(array $r) {
         'unit'              => ['Mértékegység','Egység','Mee','Mee.'],
         'short_description' => ['Rövid leírás'],
         'description'       => ['Leírás'],
-        'category'          => ['Kategória','Kategóriák'],
+        'category'          => ['Kategória','Kategóriák', '1. csoport' ],
         'images'            => ['Kép URL','Kép URL-ek'],
     ];
 
