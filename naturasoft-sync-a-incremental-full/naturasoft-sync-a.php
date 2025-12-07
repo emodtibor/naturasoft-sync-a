@@ -454,3 +454,43 @@ final class Naturasoft_Sync_A {
 }
 
 add_action('plugins_loaded', function(){ new Naturasoft_Sync_A(); });
+// Egység kiírása a termékoldalon a név alatt
+add_action('woocommerce_single_product_summary', function () {
+    global $product;
+    if (!$product instanceof WC_Product) {
+        return;
+    }
+
+    $unit = get_post_meta($product->get_id(), '_nsa_unit', true);
+    if ($unit) {
+        echo '<p class="nsa-unit" style="margin-bottom:0.5em;">';
+        echo esc_html__('Egység: ', 'naturasoft-sync-a') . esc_html($unit);
+        echo '</p>';
+    }
+}, 6); // 5 = title, 10 = rating, szóval 6-tal kb. a cím után jön
+
+// Ár után egység kiírása: " / m"
+add_filter('woocommerce_get_price_suffix', function ($suffix, $product) {
+    if (!$product instanceof WC_Product) {
+        return $suffix;
+    }
+
+    $unit = get_post_meta($product->get_id(), '_nsa_unit', true);
+    if ($unit) {
+        // Ha van már suffix (pl. adó szöveg), ahhoz fűzzük
+        $suffix .= ' / ' . esc_html($unit);
+    }
+
+    return $suffix;
+}, 10, 2);
+
+add_filter('woocommerce_cart_item_name', function ($name, $cart_item, $cart_item_key) {
+    if (!isset($cart_item['product_id'])) {
+        return $name;
+    }
+    $unit = get_post_meta($cart_item['product_id'], '_nsa_unit', true);
+    if ($unit) {
+        $name .= ' <small>(' . esc_html($unit) . ')</small>';
+    }
+    return $name;
+}, 10, 3);

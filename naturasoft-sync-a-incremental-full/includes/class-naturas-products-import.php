@@ -340,10 +340,21 @@ function nsa_xlsx_import_products(array $rows, array $opts = []) {
 
         $product->set_name($name);
         $product->set_regular_price(wc_format_decimal($gross));
-        $product->set_manage_stock(true);
-        if ($stock !== null) {
-            $product->set_stock_quantity($stock);
-            $product->set_stock_status($stock > 0 ? 'instock' : 'outofstock');
+
+        // Készletkezelés
+        if ($stock !== null && $stock < 0) {
+            // Negatív mennyiség: NE legyen készletkezelés, egyszerűen legyen rendelhető
+            $product->set_manage_stock(false);
+            $product->set_stock_status('instock');
+            // opcionálisan kinullázhatjuk a mennyiséget is:
+            $product->set_stock_quantity(null);
+        } else {
+            // Normál eset: készletkezelés megy tovább
+            $product->set_manage_stock(true);
+            if ($stock !== null) {
+                $product->set_stock_quantity($stock);
+                $product->set_stock_status($stock > 0 ? 'instock' : 'outofstock');
+            }
         }
 
         if (!empty($r['short_description'])) {
@@ -364,6 +375,14 @@ function nsa_xlsx_import_products(array $rows, array $opts = []) {
         $is_new = !$product_id;
         $product_id = $product->save();
 
+        // UNIT mentése meta mezőbe
+        if (!empty($r['unit'])) {
+            update_post_meta(
+                $product_id,
+                '_nsa_unit',
+                sanitize_text_field($r['unit'])
+            );
+        }
         // Képek (első: kiemelt, többi: galéria)
         if (!empty($r['images'])) {
             $urls = array_filter(array_map('trim', explode($img_sep, $r['images'])));
