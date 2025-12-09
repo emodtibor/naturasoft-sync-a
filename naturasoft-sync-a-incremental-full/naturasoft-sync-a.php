@@ -494,3 +494,57 @@ add_filter('woocommerce_cart_item_name', function ($name, $cart_item, $cart_item
     }
     return $name;
 }, 10, 3);
+
+// --- NATURASOFT IMPORT MAPPATISZTÍTÁS CRON ---
+
+// Aktiváláskor ütemezzük a takarítást (napi egyszer)
+register_activation_hook(__FILE__, 'nsa_schedule_import_cleanup');
+function nsa_schedule_import_cleanup() {
+    if (!wp_next_scheduled('nsa_import_cleanup_event')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'nsa_import_cleanup_event');
+    }
+}
+
+// Deaktiváláskor töröljük az ütemezett eseményt
+register_deactivation_hook(__FILE__, 'nsa_clear_import_cleanup');
+function nsa_clear_import_cleanup() {
+    $timestamp = wp_next_scheduled('nsa_import_cleanup_event');
+    if ($timestamp) {
+        wp_unschedule_event($timestamp, 'nsa_import_cleanup_event');
+    }
+}
+
+// A tényleges takarító callback – napi egyszer fut (WP cron)
+add_action('nsa_import_cleanup_event', 'nsa_cleanup_naturasoft_import_dir');
+
+function nsa_cleanup_naturasoft_import_dir() {
+    $uploads = wp_upload_dir();
+    if (!empty($uploads['error'])) {
+        return;
+    }
+
+    $dir = trailingslashit($uploads['basedir']) . 'naturasoft-import';
+    if (!is_dir($dir)) {
+        return;
+    }
+
+    // 30 napnál régebbi fájlokat töröljük
+    $ttl = 30 * DAY_IN_SECONDS;
+    $now = time();
+
+    $files = glob($dir . '/*');
+    if (!$files) {
+        return;
+    }
+
+    foreach ($files as $file) {
+        if (!is_file($file)) {
+            continue;
+        }
+
+        $mtime = @filemtime($file);
+        if ($mtime && ($now - $mtime) > $ttl) {
+            @unlink($file);
+        }
+    }
+}

@@ -27,7 +27,7 @@ class Naturasoft_Products_Import {
 
     public static function add_menu() {
         add_submenu_page(
-            'woocommerce',
+            'naturasoft-sync-a',
             'Naturasoft Termékimport (XLSX)',
             'Naturasoft Termékimport',
             'manage_woocommerce',
@@ -40,14 +40,34 @@ class Naturasoft_Products_Import {
         if (!current_user_can('manage_woocommerce')) {
             wp_die('Nincs jogosultság.');
         }
+
+        $current_user_id = get_current_user_id();
+        $last_file       = get_user_meta($current_user_id, '_nsa_last_import_file', true);
+        $has_last_file   = $last_file && file_exists($last_file);
         ?>
         <div class="wrap">
-            <h1>Naturasoft Termékimport (XLSX)</h1>
+            <h1>Naturasoft Termékimport (XLSX/XLS)</h1>
+
+            <?php if ($has_last_file): ?>
+                <p>
+                    <strong>Legutóbb feltöltött fájl:</strong>
+                    <?php echo esc_html(basename($last_file)); ?><br>
+                    Ha nem választasz új fájlt, az <strong>Importálás</strong> gomb ezt a fájlt fogja használni.
+                </p>
+            <?php else: ?>
+                <p><strong>Még nincs elmentett fájlod.</strong> Kérlek először tölts fel egy XLS/XLSX fájlt.</p>
+            <?php endif; ?>
+
             <form method="post" enctype="multipart/form-data">
                 <?php wp_nonce_field('nsa_import_xlsx', 'nsa_import_xlsx_nonce'); ?>
 
                 <p>
-                    <input type="file" name="nsa_file" accept=".xlsx,.xls" required>
+                    <input
+                            type="file"
+                            name="nsa_file"
+                            accept=".xlsx,.xls"
+                        <?php echo $has_last_file ? '' : 'required'; ?>
+                    >
                 </p>
 
                 <p>
@@ -79,34 +99,88 @@ class Naturasoft_Products_Import {
     }
 
     public static function handle_post() {
-        if (!isset($_POST['nsa_action'])) return;
-        if (!current_user_can('manage_woocommerce')) return;
-        if (!wp_verify_nonce($_POST['nsa_import_xlsx_nonce'] ?? '', 'nsa_import_xlsx')) return;
-        if (empty($_FILES['nsa_file']['tmp_name'])) return;
+        if (!isset($_POST['nsa_action'])) {
+            return;
+        }
+        if (!current_user_can('manage_woocommerce')) {
+            return;
+        }
+        if (!wp_verify_nonce($_POST['nsa_import_xlsx_nonce'] ?? '', 'nsa_import_xlsx')) {
+            return;
+        }
 
-        $tmp = $_FILES['nsa_file']['tmp_name'];
+        $action         = $_POST['nsa_action'];
         $price_fallback = $_POST['nsa_price_fallback'] ?? '0';
-        $cat_sep = $_POST['nsa_cat_sep'] ?? '>';
-        $img_sep = $_POST['nsa_img_sep'] ?? ';';
+        $cat_sep        = $_POST['nsa_cat_sep'] ?? '>';
+        $img_sep        = $_POST['nsa_img_sep'] ?? ';';
 
+        $current_user_id = get_current_user_id();
+        $tmp             = $_FILES['nsa_file']['tmp_name'] ?? '';
+        $original_name   = $_FILES['nsa_file']['name'] ?? '';
+
+        // Ha MOST érkezett fájl, mentsük el az uploads alá, hogy importnál újra tudjuk használni
+        $stored_path = '';
+        if ($tmp && is_uploaded_file($tmp)) {
+            $uploads = wp_upload_dir();
+            $dir     = trailingslashit($uploads['basedir']) . 'naturasoft-import';
+            if (!file_exists($dir)) {
+                wp_mkdir_p($dir);
+            }
+
+            $ext = strtolower(pathinfo($original_name, PATHINFO_EXTENSION));
+            if (!$ext) {
+                $ext = 'xlsx';
+            }
+
+            $stored_path = trailingslashit($dir) . 'last-products-import-' . $current_user_id . '.' . $ext;
+
+            if (!@move_uploaded_file($tmp, $stored_path)) {
+                // ha valamiért nem sikerül mozgatni, használjuk a temp fájlt
+                $stored_path = $tmp;
+            } else {
+                update_user_meta($current_user_id, '_nsa_last_import_file', $stored_path);
+            }
+        } else {
+            // Nincs új upload – próbáljuk a legutóbbi elmentett fájlt használni
+            $stored_path = get_user_meta($current_user_id, '_nsa_last_import_file', true);
+        }
+
+        // Ha se új fájl, se korábbi elmentett nincs, jelezzük a hibát
+        if (!$stored_path || !file_exists($stored_path)) {
+            add_action('admin_notices', function () {
+                echo '<div class="notice notice-error"><p>';
+                echo esc_html__('Nincs elérhető XLS/XLSX fájl az importhoz. Kérlek töltsd fel újra a fájlt.', 'naturasoft-sync-a');
+                echo '</p></div>';
+            });
+            return;
+        }
+
+        // Ha nincs külön original_name (pl. importnál), használjuk az elmentett fájl nevét
+        if (!$original_name) {
+            $original_name = basename($stored_path);
+        }
+
+        // XLS/XLSX beolvasása
         try {
-            $original_name = $_FILES['nsa_file']['name'] ?? '';
-            $rows = nsa_xlsx_parse($tmp, $original_name);
+            $rows = nsa_xlsx_parse($stored_path, $original_name);
         } catch (\Throwable $e) {
-            add_action('admin_notices', function() use ($e) {
+            add_action('admin_notices', function () use ($e) {
                 echo '<div class="notice notice-error"><p>Hiba az XLSX olvasásakor: ' .
                     esc_html($e->getMessage()) . '</p></div>';
             });
             return;
         }
 
-        if ($_POST['nsa_action'] === 'preview') {
-            add_action('admin_notices', function() use ($rows) {
+        // ELŐNÉZET
+        if ($action === 'preview') {
+            add_action('admin_notices', function () use ($rows, $original_name) {
                 if (!$rows) {
-                    echo '<div class="notice notice-warning"><p>Nincs adat az XLSX-ben.</p></div>';
+                    echo '<div class="notice notice-warning"><p>Nincs adat az Excel fájlban.</p></div>';
                     return;
                 }
-                echo '<div class="notice notice-info"><p><strong>Előnézet (első 10 sor):</strong></p>';
+                echo '<div class="notice notice-info">';
+                echo '<p><strong>Előnézet (első 10 sor) – fájl:</strong> ' . esc_html($original_name) . '</p>';
+                echo '<p>Ezt a fájlt elmentettük, az <strong>Importálás</strong> gombbal újrafeltöltés nélkül importálhatod.</p>';
                 echo '<table class="widefat"><thead><tr>';
                 foreach (array_keys($rows[0]) as $h) {
                     echo '<th>' . esc_html($h) . '</th>';
@@ -124,21 +198,26 @@ class Naturasoft_Products_Import {
             return;
         }
 
-        $report = nsa_xlsx_import_products($rows, [
-            'price_fallback' => $price_fallback,
-            'cat_sep'        => $cat_sep,
-            'img_sep'        => $img_sep,
-        ]);
+        // IMPORT
+        if ($action === 'import') {
+            $report = nsa_xlsx_import_products($rows, [
+                'price_fallback' => $price_fallback,
+                'cat_sep'        => $cat_sep,
+                'img_sep'        => $img_sep,
+            ]);
 
-        add_action('admin_notices', function() use ($report) {
-            echo '<div class="notice notice-success"><p><strong>Import kész.</strong> ' .
-                sprintf(
+            add_action('admin_notices', function () use ($report, $original_name) {
+                echo '<div class="notice notice-success"><p><strong>Import kész.</strong> ';
+                echo esc_html($original_name) . ': ';
+                echo sprintf(
                     'Létrejött: %d, frissült: %d, kihagyva: %d',
                     $report['created'],
                     $report['updated'],
                     $report['skipped']
-                ) . '</p></div>';
-        });
+                );
+                echo '</p></div>';
+            });
+        }
     }
 }
 
